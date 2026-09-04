@@ -20,5 +20,10 @@ It is a multi-agent architecture allowing for specialized agents to perform thei
 ---
 
 ## Installation
-Make sure to intall all requirement with the below command in terminal
+1- Download repo
+2- Install python>=3.14.6
+3- Make sure to intall all requirement with the below command in terminal
 pip install -r .\requirements.txt
+4- Download Ollama
+run the below command in Windows PowerShell as administrator
+irm https://ollama.com/install.ps1 | iex

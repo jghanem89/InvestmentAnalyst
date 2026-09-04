@@ -1,0 +1,2 @@
+OLLAMA_MODEL="qwen3:8b"
+OLLAMA_TEMP=0.3
