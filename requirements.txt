@@ -1,20 +1,23 @@
 # Utils
-pandas>=2.1.4
-numpy>=1.26.3
-python-dotenv>=1.0.0
-pyyaml>=6.0.1
+pandas>=3.0.5
+numpy>=2.5.1
+python-dotenv>=1.2.3
+pyyaml>=6.0.3
 
 # Open Source Local LLM
-langchain-ollama>=0.1.0
-ollama>=0.2.0
-langgraph>=0.0.26
+ollama>=0.6.2
+
+# Framework & Orchestration
+langchain>=1.4.0
+langchain-ollama>=1.1.0
+langgraph>=1.2.11
 
 # Vector DBs
-chromadb>=0.4.22
+chromadb>=1.5.9
 
 # Financial Data
-yfinance>=0.2.35
+yfinance>=1.7.0
 
 # Sentiment Analysis
-nltk>=3.8.1
-textblob>=0.17.1
+nltk>=3.10.3
+textblob>=0.20.1
