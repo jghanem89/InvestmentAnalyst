@@ -8,7 +8,9 @@ from abc import ABC, abstractmethod
 from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime, timezone
 import json
-import settings
+
+OLLAMA_MODEL="qwen3:8b"
+OLLAMA_TEMP=0.3
 
 class AgentState(BaseModel):
     """Pydantic Model for agent state"""
@@ -21,7 +23,7 @@ class AgentState(BaseModel):
     errors: List[str] = Field(default_factory=list)
     start_time: Optional[datetime] = None
     completion_time: Optional[datetime] = None
-    config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class AgentResult(BaseModel):
@@ -67,8 +69,8 @@ class BaseAgent():
         # self.max_reasoning_steps = max_reasoning_steps
         self.verbose = verbose
         self.llm = ChatOllama(
-            model=settings.OLLAMA_MODEL,
-            temperature=settings.OLLAMA_TEMP
+            model=OLLAMA_MODEL,
+            temperature=OLLAMA_TEMP
             )
         self.state = AgentState(name=name)
         self.graph = self._create_graph()
@@ -180,7 +182,7 @@ class BaseAgent():
 
             self.state.status = "completed"
             self.state.completion_time = datetime.now(timezone.utc)
-            self.state.results[task[:50]] = output
+            self.state.results[task[:100]] = output
 
             return AgentResult(
                 success=True,
