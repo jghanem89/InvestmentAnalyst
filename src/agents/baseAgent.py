@@ -114,6 +114,7 @@ class BaseAgent():
         """
         Appends a ReAct prompt to the current task and context for proper reasoning
         """
+        print("Added base react prompt")
         react_prompt = """Follow the below step by step approach when reasoning
         1- Think about which data is needed and if we have an appropriate tool
         2- Call the corresponding tools to collect data and observations - never use data that isn't returned by a tool

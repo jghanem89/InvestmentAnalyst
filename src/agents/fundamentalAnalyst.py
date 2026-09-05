@@ -2,8 +2,9 @@
 Fundamental analysis sub-agent.
 
 Wraps yfinance as a data source and exposes the classic fundamental ratios
-(P/E, EV/EBITDA, margins, ROE, liquidity, quick, cash, revenue growth) both as
-plain Python methods and as LangChain tools the LLM can call on its own.
+(P/E, EV/EBITDA, margins, ROE, liquidity, quick, cash, revenue growth) plus a
+simplified discounted cash flow model, both as plain Python methods and as
+LangChain tools the LLM can call on its own.
 """
 
 from __future__ import annotations
@@ -132,6 +133,114 @@ _CASH = ["Cash And Cash Equivalents", "Cash Financial", "Cash And Cash Equivalen
 _SHORT_TERM_INV = ["Other Short Term Investments", "Short Term Investments"]
 _CASH_AND_STI = ["Cash Cash Equivalents And Short Term Investments"]
 _DEP_AMORT = ["Depreciation And Amortization", "Depreciation Amortization Depletion"]
+_OPERATING_CF = [
+    "Operating Cash Flow", "Total Cash From Operating Activities",
+    "Cash Flow From Continuing Operating Activities",
+]
+_CAPEX = ["Capital Expenditure", "Capital Expenditures", "Purchase Of PPE"]
+
+# Typical gross margin (%) by yfinance industry label, looked up through _norm() so
+# the em dashes and ampersands in those labels do not matter. Static reference points
+# for "is this margin normal for what the company sells?", not live peer data.
+_GROSS_MARGIN_BY_INDUSTRY = {
+    "Software - Infrastructure": 72.0,
+    "Software - Application": 70.0,
+    "Information Technology Services": 30.0,
+    "Semiconductors": 50.0,
+    "Semiconductor Equipment & Materials": 45.0,
+    "Computer Hardware": 35.0,
+    "Consumer Electronics": 40.0,
+    "Communication Equipment": 50.0,
+    "Electronic Components": 30.0,
+    "Internet Content & Information": 55.0,
+    "Internet Retail": 40.0,
+    "Entertainment": 40.0,
+    "Telecom Services": 55.0,
+    "Biotechnology": 80.0,
+    "Drug Manufacturers - General": 70.0,
+    "Drug Manufacturers - Specialty & Generic": 55.0,
+    "Medical Devices": 60.0,
+    "Healthcare Plans": 20.0,
+    "Medical Distribution": 10.0,
+    "Discount Stores": 25.0,
+    "Grocery Stores": 25.0,
+    "Restaurants": 30.0,
+    "Apparel Retail": 45.0,
+    "Auto Manufacturers": 18.0,
+    "Aerospace & Defense": 20.0,
+    "Airlines": 25.0,
+    "Oil & Gas Integrated": 30.0,
+    "Oil & Gas E&P": 50.0,
+    "Utilities - Regulated Electric": 35.0,
+}
+
+# Sector-level fallback when the industry label is missing or unlisted.
+_GROSS_MARGIN_BY_SECTOR = {
+    "Technology": 55.0,
+    "Healthcare": 55.0,
+    "Communication Services": 50.0,
+    "Financial Services": 60.0,
+    "Consumer Cyclical": 35.0,
+    "Consumer Defensive": 30.0,
+    "Industrials": 30.0,
+    "Basic Materials": 25.0,
+    "Energy": 30.0,
+    "Utilities": 35.0,
+    "Real Estate": 45.0,
+}
+
+# Last resort when yfinance reports neither an industry nor a sector.
+_GROSS_MARGIN_DEFAULT = 35.0
+
+# Typical operating margin (%) for the same industries. Operating margin sits far
+# below gross margin because it carries R&D, selling and administrative costs.
+_OPERATING_MARGIN_BY_INDUSTRY = {
+    "Software - Infrastructure": 30.0,
+    "Software - Application": 12.0,
+    "Information Technology Services": 10.0,
+    "Semiconductors": 25.0,
+    "Semiconductor Equipment & Materials": 22.0,
+    "Computer Hardware": 10.0,
+    "Consumer Electronics": 25.0,
+    "Communication Equipment": 15.0,
+    "Electronic Components": 10.0,
+    "Internet Content & Information": 25.0,
+    "Internet Retail": 6.0,
+    "Entertainment": 10.0,
+    "Telecom Services": 18.0,
+    "Biotechnology": 20.0,
+    "Drug Manufacturers - General": 25.0,
+    "Drug Manufacturers - Specialty & Generic": 15.0,
+    "Medical Devices": 18.0,
+    "Healthcare Plans": 5.0,
+    "Medical Distribution": 2.0,
+    "Discount Stores": 5.0,
+    "Grocery Stores": 3.0,
+    "Restaurants": 12.0,
+    "Apparel Retail": 10.0,
+    "Auto Manufacturers": 7.0,
+    "Aerospace & Defense": 9.0,
+    "Airlines": 8.0,
+    "Oil & Gas Integrated": 12.0,
+    "Oil & Gas E&P": 25.0,
+    "Utilities - Regulated Electric": 20.0,
+}
+
+_OPERATING_MARGIN_BY_SECTOR = {
+    "Technology": 20.0,
+    "Healthcare": 12.0,
+    "Communication Services": 18.0,
+    "Financial Services": 25.0,
+    "Consumer Cyclical": 8.0,
+    "Consumer Defensive": 7.0,
+    "Industrials": 10.0,
+    "Basic Materials": 10.0,
+    "Energy": 12.0,
+    "Utilities": 18.0,
+    "Real Estate": 25.0,
+}
+
+_OPERATING_MARGIN_DEFAULT = 10.0
 
 
 # --------------------------------------------------------------------------- #
@@ -150,8 +259,14 @@ class FundamentalAnalystAgent(BaseAgent):
     DEFAULT_NAME = "fundamental_analyst"
     DEFAULT_DESCRIPTION = (
         "Analyzes company fundamentals: income statement, balance sheet, "
-        "valuation multiples, margins, returns, liquidity and revenue growth."
+        "valuation multiples, margins, returns, liquidity, revenue growth and a "
+        "simplified discounted cash flow valuation."
     )
+
+    # Simplified DCF assumptions.
+    DCF_DISCOUNT_RATE = 0.10
+    DCF_TERMINAL_GROWTH = 0.02
+    DCF_FORECAST_YEARS = 10
 
     def __init__(
         self,
@@ -350,7 +465,20 @@ class FundamentalAnalystAgent(BaseAgent):
         value = _safe_div(price, eps)
         if value is None:
             value = _to_float(info.get("trailingPE"))
-        note = "Negative or zero EPS makes P/E meaningless." if (eps is not None and eps <= 0) else None
+
+        print(f"Calculated P/E ratio is {value}")
+
+        note = None
+        if value is not None:
+            if eps <= 0:
+                note = "Negative or zero EPS makes P/E meaningless."
+            elif value < 15:
+                note = "Undervalued"
+            elif value > 30:
+                note = "Overvalued"
+            else:
+                note = "Fairly valued"
+
         return self._metric(
             "P/E (trailing)",
             round(value, 2) if value is not None else None,
@@ -381,7 +509,19 @@ class FundamentalAnalystAgent(BaseAgent):
                 ebitda = operating_income + dep_amort
 
         value = _safe_div(ev, ebitda)
-        note = "Negative EBITDA makes this multiple meaningless." if (ebitda is not None and ebitda <= 0) else None
+        print(f"Calculated EV/EBIDTA ratio is {value}")
+
+        note = None
+        if value is not None:
+            if ebitda <=0:
+                note = "Negative EBITDA makes this multiple meaningless."
+            elif value < 10:
+                note = "Attractive"
+            elif value > 15:
+                note = "Expensive"
+            else:
+                note = "Fair"
+        
         return self._metric(
             "EV/EBITDA",
             round(value, 2) if value is not None else None,
@@ -391,8 +531,32 @@ class FundamentalAnalystAgent(BaseAgent):
             note=note,
         )
 
+    def _margin_benchmark(
+        self,
+        symbol: str,
+        by_industry: Dict[str, float],
+        by_sector: Dict[str, float],
+        default: float,
+    ) -> Dict[str, Any]:
+        """Typical margin for the company's industry, falling back to its sector."""
+        info = self._info(symbol)
+        industry = info.get("industry")
+        sector = info.get("sector")
+
+        index_map = {_norm(label): value for label, value in by_industry.items()}
+        benchmark = index_map.get(_norm(industry)) if industry else None
+        if benchmark is not None:
+            return {"benchmark": benchmark, "peer_group": str(industry), "basis": "industry"}
+
+        index_map = {_norm(label): value for label, value in by_sector.items()}
+        benchmark = index_map.get(_norm(sector)) if sector else None
+        if benchmark is not None:
+            return {"benchmark": benchmark, "peer_group": str(sector), "basis": "sector"}
+
+        return {"benchmark": default, "peer_group": "the broad market", "basis": "default"}
+
     def gross_margin(self, symbol: str) -> Dict[str, Any]:
-        """Gross profit / revenue for the most recent fiscal year."""
+        """Gross profit / revenue for the most recent fiscal year, against its industry benchmark."""
         income = self._statement(symbol, "income")
         revenue = _row_value(income, _REVENUE)
         gross = _row_value(income, _GROSS_PROFIT)
@@ -401,26 +565,81 @@ class FundamentalAnalystAgent(BaseAgent):
             if revenue is not None and cost is not None:
                 gross = revenue - cost
         value = _safe_div(gross, revenue)
+        margin = round(value * 100, 2) if value is not None else None
+
+        info = self._info(symbol)
+        peers = self._margin_benchmark(
+            symbol, _GROSS_MARGIN_BY_INDUSTRY, _GROSS_MARGIN_BY_SECTOR, _GROSS_MARGIN_DEFAULT
+        )
+        benchmark = peers["benchmark"]
+
+        print(f"Calculated gross margin is {margin}")
+
+        gap = None
+        note = None
+        if margin is not None:
+            gap = round(margin - benchmark, 2)
+            if gap > 10:
+                note = "Above average"
+            elif gap < -10:
+                note = "Below Average"
+            else:
+                note = "Average"
+
         return self._metric(
             "Gross margin",
-            round(value * 100, 2) if value is not None else None,
+            margin,
             "%",
             inputs={"gross_profit": gross, "revenue": revenue},
             period=_col_label(income),
+            industry=info.get("industry"),
+            sector=info.get("sector"),
+            industry_benchmark_pct=benchmark,
+            benchmark_basis=peers["basis"],
+            vs_benchmark_pp=gap,
+            note=note,
         )
 
     def operating_margin(self, symbol: str) -> Dict[str, Any]:
-        """Operating income / revenue for the most recent fiscal year."""
+        """Operating income / revenue for the most recent fiscal year, against its industry benchmark."""
         income = self._statement(symbol, "income")
         revenue = _row_value(income, _REVENUE)
         operating_income = _row_value(income, _OPERATING_INCOME)
         value = _safe_div(operating_income, revenue)
+        margin = round(value * 100, 2) if value is not None else None
+
+        info = self._info(symbol)
+        peers = self._margin_benchmark(
+            symbol, _OPERATING_MARGIN_BY_INDUSTRY, _OPERATING_MARGIN_BY_SECTOR, _OPERATING_MARGIN_DEFAULT
+        )
+        benchmark = peers["benchmark"]
+
+        print(f"Calculated oeprating margin is {margin}")
+        
+        gap = None
+        note = None
+        if margin is not None:
+            # Narrower band than gross margin: operating margins are smaller numbers.
+            gap = round(margin - benchmark, 2)
+            if gap > 5:
+                note = "Above average"
+            elif gap < -5:
+                note = "Below average"
+            else:
+                note = "Average"
+
         return self._metric(
             "Operating margin",
-            round(value * 100, 2) if value is not None else None,
+            margin,
             "%",
             inputs={"operating_income": operating_income, "revenue": revenue},
             period=_col_label(income),
+            industry=info.get("industry"),
+            sector=info.get("sector"),
+            industry_benchmark_pct=benchmark,
+            benchmark_basis=peers["basis"],
+            vs_benchmark_pp=gap,
+            note=note,
         )
 
     def roe(self, symbol: str) -> Dict[str, Any]:
@@ -430,9 +649,22 @@ class FundamentalAnalystAgent(BaseAgent):
         net_income = _row_value(income, _NET_INCOME)
         equity = _row_value(balance, _EQUITY)
         value = _safe_div(net_income, equity)
-        note = "Computed on ending equity, not average equity."
-        if equity is not None and equity < 0:
-            note += " Equity is negative, which inverts the sign and makes the ratio unreliable."
+
+        print(f"Calculated ROE is {value}")
+
+        note = None
+        if value is not None:
+            if value < 0:
+                note = "Negative equity - unreliable ratio"
+            elif value > 0.2:
+                note = "Excellent"
+            elif value > 0.15:
+                note = "Good"
+            elif value > 0.1:
+                note = "Average"
+            else:
+                note = "Below Average"
+
         return self._metric(
             "Return on equity",
             round(value * 100, 2) if value is not None else None,
@@ -448,13 +680,25 @@ class FundamentalAnalystAgent(BaseAgent):
         assets = _row_value(balance, _TOTAL_ASSETS)
         liabilities = _row_value(balance, _TOTAL_LIABILITIES)
         value = _safe_div(assets, liabilities)
+
+        print(f"Calculated Liquidity ratio is {value}")
+
+        note = None
+        if value is not None:
+            if value > 2.0:
+                note = "Strong liquidity"
+            elif value > 1.0:
+                note = "Adequate liquidity"
+            else:
+                note = "Weak liquidity"
+        
         return self._metric(
             "Liquidity ratio (assets/liabilities)",
             round(value, 2) if value is not None else None,
             "x",
             inputs={"total_assets": assets, "total_liabilities": liabilities},
             period=_col_label(balance),
-            note="Coverage of all liabilities by all assets; above 1.0 means positive book equity.",
+            note=note,
         )
 
     def quick_ratio(self, symbol: str) -> Dict[str, Any]:
@@ -467,6 +711,16 @@ class FundamentalAnalystAgent(BaseAgent):
         value = _safe_div(numerator, current_liabilities)
         if value is None:
             value = _to_float(self._info(symbol).get("quickRatio"))
+
+        print(f"Calculated quick ratio is {value}")
+
+        note = None
+        if value is not None:
+            if value >= 1.0:
+                note = "1 year liabilities are covered by liquid assets"
+            else:
+                note = "1 year liabilities are not covered by liquid assets"
+
         return self._metric(
             "Quick ratio",
             round(value, 2) if value is not None else None,
@@ -477,7 +731,7 @@ class FundamentalAnalystAgent(BaseAgent):
                 "current_liabilities": current_liabilities,
             },
             period=_col_label(balance),
-            note="Below 1.0 means liquid assets do not cover liabilities due within a year.",
+            note=note,
         )
 
     def cash_ratio(self, symbol: str) -> Dict[str, Any]:
@@ -490,6 +744,18 @@ class FundamentalAnalystAgent(BaseAgent):
             cash_and_sti = (cash + short_term) if cash is not None else None
         current_liabilities = _row_value(balance, _CURRENT_LIABILITIES)
         value = _safe_div(cash_and_sti, current_liabilities)
+
+        print(f"Calculated cash ratio is {value}")
+
+        note = None
+        if value is not None:
+            if value > 1.0:
+                note = "strong cash ratio"
+            elif value > 0.5:
+                note = "normal cash ratio"
+            else:
+                note = "weak cash ratio"
+
         return self._metric(
             "Cash ratio",
             round(value, 2) if value is not None else None,
@@ -499,6 +765,7 @@ class FundamentalAnalystAgent(BaseAgent):
                 "current_liabilities": current_liabilities,
             },
             period=_col_label(balance),
+            note=note
         )
 
     def revenue_growth_yoy(self, symbol: str) -> Dict[str, Any]:
@@ -515,35 +782,200 @@ class FundamentalAnalystAgent(BaseAgent):
         if value is None:
             value = _to_float(self._info(symbol).get("revenueGrowth"))
 
+        print(f"Calculated revenue growth is {value}")
+
+        note = None
+        if value is not None:
+            if value > 0.5:
+                note = "Hyper growth"
+            elif value > 0.2:
+                note = "High growth"
+            elif value > 0.05:
+                note = "Moderate growth"
+            elif value > 0:
+                note = "Stagnant or flat growth"
+            else:
+                note = "Negative growth"
+
         return self._metric(
             "Revenue growth YoY",
             round(value * 100, 2) if value is not None else None,
             "%",
             inputs={"latest_revenue": latest, "prior_revenue": prior},
             period=period,
+            note=note
         )
 
-    def calculate_all_ratios(self, symbol: str) -> Dict[str, Any]:
-        """Run every ratio in one pass and return them keyed by name."""
+    # ------------------------------------------------------------------ #
+    # Discounted cash flow
+    # ------------------------------------------------------------------ #
+
+    def _free_cash_flows(self, symbol: str) -> List[Dict[str, Any]]:
+        """Free cash flow per fiscal year, newest first: operating cash flow + capital expenditure."""
+        cashflow = self._statement(symbol, "cashflow")
+        if cashflow is None or getattr(cashflow, "empty", True):
+            return []
+
+        history: List[Dict[str, Any]] = []
+        for col in range(len(cashflow.columns)):
+            operating = _row_value(cashflow, _OPERATING_CF, col=col)
+            capex = _row_value(cashflow, _CAPEX, col=col)
+            if operating is None or capex is None:
+                continue
+            history.append({
+                "period": _col_label(cashflow, col),
+                "operating_cash_flow": operating,
+                "capital_expenditure": capex,
+                # yfinance reports capital expenditure as a negative number, so adding it subtracts.
+                "free_cash_flow": operating + capex,
+            })
+        return history
+
+    def discounted_cash_flow(self, symbol: str) -> Dict[str, Any]:
+        """
+        Simplified DCF intrinsic value per share.
+
+        Free cash flow is operating cash flow plus capital expenditure, grown at its
+        historical CAGR for ten years, discounted at 10%, with a 2% perpetual growth
+        terminal value. The total present value is divided by shares outstanding.
+        """
         symbol = symbol.strip().upper()
-        calculators = {
-            "pe_ratio": self.pe_ratio,
-            "ev_ebitda": self.ev_ebitda,
-            "gross_margin": self.gross_margin,
-            "operating_margin": self.operating_margin,
-            "roe": self.roe,
-            "liquidity_ratio": self.liquidity_ratio,
-            "quick_ratio": self.quick_ratio,
-            "cash_ratio": self.cash_ratio,
-            "revenue_growth_yoy": self.revenue_growth_yoy,
-        }
-        results: Dict[str, Any] = {"symbol": symbol}
-        for key, calculate in calculators.items():
-            try:
-                results[key] = calculate(symbol)
-            except Exception as exc:
-                results[key] = {"metric": key, "value": None, "error": str(exc)}
-        return results
+        history = self._free_cash_flows(symbol)
+        if not history:
+            return self._metric(
+                "DCF intrinsic value per share", None, "currency/share",
+                symbol=symbol,
+                error="yfinance did not report the operating cash flow and capital expenditure "
+                      "needed to build free cash flow.",
+            )
+
+        base_fcf = history[0]["free_cash_flow"]
+        shares = _to_float(self._info(symbol).get("sharesOutstanding"))
+        if base_fcf <= 0:
+            return self._metric(
+                "DCF intrinsic value per share", None, "currency/share",
+                symbol=symbol,
+                free_cash_flow_history=history,
+                error="Latest free cash flow is negative or zero, so a growth-based DCF is not "
+                      "meaningful for this company.",
+            )
+        if shares is None or shares <= 0:
+            return self._metric(
+                "DCF intrinsic value per share", None, "currency/share",
+                symbol=symbol,
+                free_cash_flow_history=history,
+                error="yfinance did not report shares outstanding, so the total present value "
+                      "cannot be converted to a per-share figure.",
+            )
+
+        # Growth rate: CAGR across the reported free cash flows, oldest to newest.
+        oldest_fcf = history[-1]["free_cash_flow"]
+        elapsed_years = len(history) - 1
+        if elapsed_years >= 1 and oldest_fcf > 0:
+            growth_rate = (base_fcf / oldest_fcf) ** (1.0 / elapsed_years) - 1.0
+            growth_basis = (
+                f"{elapsed_years}-year free-cash-flow CAGR "
+                f"({history[-1]['period']} to {history[0]['period']})"
+            )
+        else:
+            growth_rate = self.DCF_TERMINAL_GROWTH
+            growth_basis = "terminal growth rate (free-cash-flow history too short for a CAGR)"
+
+        discount_rate = self.DCF_DISCOUNT_RATE
+        terminal_growth = self.DCF_TERMINAL_GROWTH
+
+        # Project the forecast horizon and discount each year back to today.
+        projections: List[Dict[str, Any]] = []
+        pv_cf = 0.0
+        cash_flow = base_fcf
+        for year in range(1, self.DCF_FORECAST_YEARS + 1):
+            cash_flow *= (1 + growth_rate)
+            present_value = cash_flow / (1 + discount_rate) ** year
+            pv_cf += present_value
+            projections.append({
+                "year": year,
+                "projected_fcf": round(cash_flow, 2),
+                "present_value": round(present_value, 2),
+            })
+
+        # Terminal value off the final projected cash flow, then discounted back.
+        terminal_value = cash_flow * (1 + terminal_growth) / (discount_rate - terminal_growth)
+        pv_tv = terminal_value / (1 + discount_rate) ** self.DCF_FORECAST_YEARS
+        total_pv = pv_cf + pv_tv
+        intrinsic_value = total_pv / shares
+
+        price = _to_float(
+            self._info(symbol).get("currentPrice")
+            or self._info(symbol).get("regularMarketPrice")
+            or self._info(symbol).get("previousClose")
+        )
+        upside = _safe_div((intrinsic_value - price) if price is not None else None, price)
+
+        print(f"Calculated intrinsic value is {intrinsic_value}")
+
+        note = None
+        if upside is not None:
+            if upside > 20:
+                note = "Severely undervalued: strong buy"
+            elif upside > 10:
+                note = "Undervalued: buy"
+            elif upside > -10:
+                note = "fairly valued: hold"
+            elif upside > 10:
+                note = "overvalued: sell"
+            else:
+                note = "Severely overvalued: strong sell"
+
+        return self._metric(
+            "DCF intrinsic value per share",
+            round(intrinsic_value, 2),
+            "currency/share",
+            symbol=symbol,
+            current_price=price,
+            upside_vs_price_pct=round(upside * 100, 2) if upside is not None else None,
+            assumptions={
+                "base_free_cash_flow": base_fcf,
+                "base_period": history[0]["period"],
+                "growth_rate_pct": round(growth_rate * 100, 2),
+                "growth_basis": growth_basis,
+                "discount_rate_pct": discount_rate * 100,
+                "terminal_growth_pct": terminal_growth * 100,
+                "forecast_years": self.DCF_FORECAST_YEARS,
+                "shares_outstanding": shares,
+            },
+            valuation={
+                "pv_cf": round(pv_cf, 2),
+                "terminal_value": round(terminal_value, 2),
+                "pv_tv": round(pv_tv, 2),
+                "total_present_value": round(total_pv, 2),
+                "intrinsic_value_per_share": round(intrinsic_value, 2),
+            },
+            projections=projections,
+            free_cash_flow_history=history,
+            note=note,
+        )
+
+    # def calculate_all_ratios(self, symbol: str) -> Dict[str, Any]:
+    #     """Run every ratio in one pass and return them keyed by name."""
+    #     symbol = symbol.strip().upper()
+    #     calculators = {
+    #         "pe_ratio": self.pe_ratio,
+    #         "ev_ebitda": self.ev_ebitda,
+    #         "gross_margin": self.gross_margin,
+    #         "operating_margin": self.operating_margin,
+    #         "roe": self.roe,
+    #         "liquidity_ratio": self.liquidity_ratio,
+    #         "quick_ratio": self.quick_ratio,
+    #         "cash_ratio": self.cash_ratio,
+    #         "revenue_growth_yoy": self.revenue_growth_yoy,
+    #     }
+    #     results: Dict[str, Any] = {"symbol": symbol}
+    #     for key, calculate in calculators.items():
+    #         try:
+    #             results[key] = calculate(symbol)
+    #         except Exception as exc:
+    #             results[key] = {"metric": key, "value": None, "error": str(exc)}
+    #     return results
 
     # ------------------------------------------------------------------ #
     # Tools
@@ -577,53 +1009,68 @@ class FundamentalAnalystAgent(BaseAgent):
 
         @tool("calculate_pe_ratio")
         def pe_ratio_tool(symbol: str) -> str:
-            """Calculate the trailing price-to-earnings (P/E) ratio for a ticker symbol."""
+            """Calculate the trailing price-to-earnings (P/E) ratio for a ticker symbol.
+            Assessment found in the note field."""
             return _dump(self.pe_ratio(symbol))
 
         @tool("calculate_ev_ebitda")
         def ev_ebitda_tool(symbol: str) -> str:
-            """Calculate the enterprise-value-to-EBITDA (EV/EBITDA) multiple for a ticker symbol."""
+            """Calculate the enterprise-value-to-EBITDA (EV/EBITDA) multiple for a ticker symbol.
+            Assessment found in the note field."""
             return _dump(self.ev_ebitda(symbol))
 
         @tool("calculate_gross_margin")
         def gross_margin_tool(symbol: str) -> str:
-            """Calculate the gross margin percentage (gross profit / revenue) for a ticker symbol."""
+            """Calculate the gross margin percentage (gross profit / revenue) for a ticker symbol and compare it to the typical gross margin for that company's industry."""
             return _dump(self.gross_margin(symbol))
 
         @tool("calculate_operating_margin")
         def operating_margin_tool(symbol: str) -> str:
-            """Calculate the operating margin percentage (operating income / revenue) for a ticker symbol."""
+            """Calculate the operating margin percentage (operating income / revenue) for a ticker symbol and compare it to the typical operating margin for that company's industry.
+            Assessment found in the note field."""
             return _dump(self.operating_margin(symbol))
 
         @tool("calculate_roe")
         def roe_tool(symbol: str) -> str:
-            """Calculate return on equity (net income / shareholders' equity) for a ticker symbol."""
+            """Calculate return on equity (net income / shareholders' equity) for a ticker symbol.
+            Assessment found in the note field."""
             return _dump(self.roe(symbol))
 
         @tool("calculate_liquidity_ratio")
         def liquidity_ratio_tool(symbol: str) -> str:
-            """Calculate the liquidity ratio defined as total assets divided by total liabilities for a ticker symbol."""
+            """Calculate the liquidity ratio defined as total assets divided by total liabilities for a ticker symbol.
+            Assessment found in the note field."""
             return _dump(self.liquidity_ratio(symbol))
 
         @tool("calculate_quick_ratio")
         def quick_ratio_tool(symbol: str) -> str:
-            """Calculate the quick ratio, (current assets minus inventory) divided by current liabilities, for a ticker symbol."""
+            """Calculate the quick ratio, (current assets minus inventory) divided by current liabilities, for a ticker symbol.
+            Assessment found in the note field."""
             return _dump(self.quick_ratio(symbol))
 
         @tool("calculate_cash_ratio")
         def cash_ratio_tool(symbol: str) -> str:
-            """Calculate the cash ratio, (cash plus short-term investments) divided by current liabilities, for a ticker symbol."""
+            """Calculate the cash ratio, (cash plus short-term investments) divided by current liabilities, for a ticker symbol.
+            Assessment found in the note field."""
             return _dump(self.cash_ratio(symbol))
 
         @tool("calculate_revenue_growth_yoy")
         def revenue_growth_tool(symbol: str) -> str:
-            """Calculate year-over-year revenue growth from the last two reported fiscal years for a ticker symbol."""
+            """Calculate year-over-year revenue growth from the last two reported fiscal years for a ticker symbol.
+            Assessment found in the note field."""
             return _dump(self.revenue_growth_yoy(symbol))
 
-        @tool("calculate_all_ratios")
-        def all_ratios_tool(symbol: str) -> str:
-            """Calculate every supported fundamental ratio at once: P/E, EV/EBITDA, gross margin, operating margin, ROE, liquidity ratio, quick ratio, cash ratio and revenue growth."""
-            return _dump(self.calculate_all_ratios(symbol))
+        @tool("calculate_dcf")
+        def dcf_tool(symbol: str) -> str:
+            """Run a simplified discounted cash flow (DCF) valuation for a ticker symbol and return the intrinsic value per share. Free cash flow is operating cash flow plus capital expenditure from the cash-flow statement, grown at its historical CAGR over a ten-year forecast, discounted at 10% with a 2% terminal growth rate, then divided by shares outstanding.
+            Assessment found in the note field."""
+            return _dump(self.discounted_cash_flow(symbol))
+
+        # @tool("calculate_all_ratios")
+        # def all_ratios_tool(symbol: str) -> str:
+        #     """Calculate every supported fundamental ratio at once: P/E, EV/EBITDA, gross margin, operating margin, ROE, liquidity ratio, quick ratio, cash ratio and revenue growth.
+        #     Assessment for each metric found in the corresponding note field."""
+        #     return _dump(self.calculate_all_ratios(symbol))
 
         return [
             get_company_info_tool,
@@ -639,7 +1086,7 @@ class FundamentalAnalystAgent(BaseAgent):
             quick_ratio_tool,
             cash_ratio_tool,
             revenue_growth_tool,
-            all_ratios_tool,
+            dcf_tool
         ]
 
     # ------------------------------------------------------------------ #
@@ -648,61 +1095,47 @@ class FundamentalAnalystAgent(BaseAgent):
 
     def _get_prompt(self) -> str:
         """Fundamental-analysis system prompt."""
+        print("Added fundamental system prompt")
         return """You are a fundamental equity analyst working as part of a multi-agent research team.
-Your scope is the financial health and valuation of a single public company. News sentiment and
-earnings-surprise analysis belong to other agents, so do not speculate about them.
+        Your scope is the financial health and valuation of a single public company.
+        Do not speculate about any metric which doesn't have a corresponding tool.
 
-DATA RULES
-- Every number you state must come from a tool result or from the context supplied with the task.
-- Never estimate, recall from memory, or invent a missing figure. If a value is not reported, say
-  "not reported" and explain what that prevents you from concluding.
-- The ratios are computed for you. Read the value and its inputs; do not recompute them.
-- Always name the fiscal period a figure belongs to, and the currency where it matters.
+        ## Responsibilities
+        1- Consume financial statements: income statement, balance sheet and cash flow statement
+        2- Calculate valuation ratios: P/E and EV/EBITDA
+        3- Calculate profitability metrics: gross margin, operating maring and ROE
+        4- Calculate liquidity metrics: liquidity ratio, quick ratio and cash ratio
+        5- Calculate growth trend: year on year revenue growth
+        6- Calculate intrinsic value. If there is a big mismatch between DCF intrinsic value and actual stock price, try to explain why
 
-HOW TO ANALYZE
-1. Business context: what the company does, its sector, and its scale (market cap, revenue).
-2. Profitability: gross margin and operating margin, and whether they are strong or thin for that
-   sector. Read the trend across periods whenever more than one is reported.
-3. Returns: return on equity, noting when leverage or negative equity distorts it.
-4. Growth: year-over-year revenue growth, and whether growth and margins move together.
-5. Balance sheet: liquidity ratio (assets over liabilities), quick ratio and cash ratio. Treat a
-   quick ratio below 1.0 as short-term funding pressure and explain the exposure.
-6. Valuation: P/E and EV/EBITDA. Say plainly when negative or missing earnings make P/E
-   meaningless, and lean on EV/EBITDA instead. Judge the multiple against the company's own
-   growth and margins rather than an index level you cannot verify.
-
-OUTPUT FORMAT
-- Summary: two or three sentences on the company's fundamental position.
-- Key metrics: a short list of metric, value and period.
-- Strengths: bullet points, each tied to a specific figure.
-- Risks and weaknesses: bullet points, each tied to a specific figure.
-- Valuation view: do the fundamentals justify the multiple?
-- Confidence: low, medium or high, plus the data gaps behind that rating.
-
-Be direct about weak fundamentals. Do not soften a poor balance sheet, and do not give buy or sell
-advice. Report what the financials show and let the lead agent decide."""
+        ## Output Format
+        ---FUNDAMENTAL ANALYSIS---
+        1- Metrics Assessments
+        2- Key Risks
+        2- Investment recommendation of Buy/Hold/Sell with a confidence level of High/Medium/Low
+        """
 
     # ------------------------------------------------------------------ #
     # Orchestration
     # ------------------------------------------------------------------ #
 
-    def _collect_fundamentals(self, symbol: str, period: str) -> Dict[str, Any]:
-        """Blocking gather of everything yfinance can give us for one symbol."""
-        symbol = symbol.strip().upper()
-        bundle: Dict[str, Any] = {"symbol": symbol}
-        sections = {
-            "company_info": lambda: self.get_company_info(symbol),
-            "stock_price": lambda: self.get_stock_price(symbol),
-            "price_history": lambda: self.get_historical_data(symbol, period=period),
-            "financial_statements": lambda: self.get_financial_statements(symbol),
-            "ratios": lambda: self.calculate_all_ratios(symbol),
-        }
-        for key, fetch in sections.items():
-            try:
-                bundle[key] = fetch()
-            except Exception as exc:
-                bundle[key] = {"error": str(exc)}
-        return bundle
+    # def _collect_fundamentals(self, symbol: str, period: str) -> Dict[str, Any]:
+    #     """Blocking gather of everything yfinance can give us for one symbol."""
+    #     symbol = symbol.strip().upper()
+    #     bundle: Dict[str, Any] = {"symbol": symbol}
+    #     sections = {
+    #         "company_info": lambda: self.get_company_info(symbol),
+    #         "stock_price": lambda: self.get_stock_price(symbol),
+    #         "price_history": lambda: self.get_historical_data(symbol, period=period),
+    #         "financial_statements": lambda: self.get_financial_statements(symbol),
+    #         "ratios": lambda: self.calculate_all_ratios(symbol),
+    #     }
+    #     for key, fetch in sections.items():
+    #         try:
+    #             bundle[key] = fetch()
+    #         except Exception as exc:
+    #             bundle[key] = {"error": str(exc)}
+    #     return bundle
 
     async def analyze_financials(
         self,
@@ -711,7 +1144,7 @@ advice. Report what the financials show and let the lead agent decide."""
         context: Optional[Dict[str, Any]] = None,
     ) -> AgentResult:
         """
-        Fetch fundamentals for `symbol` from yfinance and have the LLM analyze them.
+        Analyze fundamentals for `symbol` from yfinance.
 
         Args:
             symbol: Ticker symbol, for example "AAPL".
@@ -726,26 +1159,19 @@ advice. Report what the financials show and let the lead agent decide."""
         period = period or self.history_period
 
         # yfinance is blocking, so keep the event loop free while it fetches.
-        fundamentals = await asyncio.to_thread(self._collect_fundamentals, symbol, period)
-        if context:
-            fundamentals["additional_context"] = context
+        # fundamentals = await asyncio.to_thread(self._collect_fundamentals, symbol, period)
+        # if context:
+        #     fundamentals["additional_context"] = context
 
-        company = fundamentals.get("company_info") or {}
+        company = self.get_company_info(symbol) or {}
         display_name = company.get("longName") or company.get("shortName") or symbol
 
+        print("Added fundamental task prompt")
         task = (
-            f"Perform a fundamental analysis of {display_name} ({symbol}).\n\n"
-            "The company profile, latest price, price history, annual financial statements and all "
-            "pre-computed ratios are provided in the context below. Use them as your primary source, "
-            "and call a tool only if a figure you need is missing from that context.\n\n"
-            "Cover profitability (gross and operating margin), returns (ROE), year-over-year revenue "
-            "growth, balance-sheet strength (assets over liabilities, quick ratio, cash ratio) and "
-            "valuation (P/E, EV/EBITDA). Finish with the structured output described in your "
-            "instructions, including a confidence rating and the data gaps behind it."
+            f"""Perform a fundamental analysis of {display_name} ({symbol})"""
         )
 
-        result = await self.execute(task=task, context=fundamentals)
+        result = await self.execute(task=task)
         if result.success:
             result.data["symbol"] = symbol
-            result.data["fundamentals"] = fundamentals
         return result
