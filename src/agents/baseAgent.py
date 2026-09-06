@@ -70,7 +70,8 @@ class BaseAgent():
         self.verbose = verbose
         self.llm = ChatOllama(
             model=OLLAMA_MODEL,
-            temperature=OLLAMA_TEMP
+            temperature=OLLAMA_TEMP,
+            verbose=verbose
             )
         self.state = AgentState(name=name)
         self.graph = self._create_graph()
@@ -114,10 +115,10 @@ class BaseAgent():
         """
         Appends a ReAct prompt to the current task and context for proper reasoning
         """
-        print("Added base react prompt")
+        # print("Added base react prompt")
         react_prompt = """Follow the below step by step approach when reasoning
         1- Think about which data is needed and if we have an appropriate tool
-        2- Call the corresponding tools to collect data and observations - never use data that isn't returned by a tool
+        2- Call the corresponding tools to collect data or perform calculations - never use data that isn't returned by a tool
         3- Analyze the results returned
         4- Return a conclusion supported by observations and specify if confidence is low, medium or high
         """
@@ -198,7 +199,7 @@ class BaseAgent():
             self.state.status = "error"
             self.state.errors.append(error_msg)
 
-            print(f"Agent {self.name} error: {error_msg}")
+            # print(f"Agent {self.name} error: {error_msg}")
 
             return AgentResult(
                 success=False,

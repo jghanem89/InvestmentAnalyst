@@ -466,7 +466,7 @@ class FundamentalAnalystAgent(BaseAgent):
         if value is None:
             value = _to_float(info.get("trailingPE"))
 
-        print(f"Calculated P/E ratio is {value}")
+        # print(f"Calculated P/E ratio is {value}")
 
         note = None
         if value is not None:
@@ -509,7 +509,7 @@ class FundamentalAnalystAgent(BaseAgent):
                 ebitda = operating_income + dep_amort
 
         value = _safe_div(ev, ebitda)
-        print(f"Calculated EV/EBIDTA ratio is {value}")
+        # print(f"Calculated EV/EBIDTA ratio is {value}")
 
         note = None
         if value is not None:
@@ -573,7 +573,7 @@ class FundamentalAnalystAgent(BaseAgent):
         )
         benchmark = peers["benchmark"]
 
-        print(f"Calculated gross margin is {margin}")
+        # print(f"Calculated gross margin is {margin}")
 
         gap = None
         note = None
@@ -614,7 +614,7 @@ class FundamentalAnalystAgent(BaseAgent):
         )
         benchmark = peers["benchmark"]
 
-        print(f"Calculated oeprating margin is {margin}")
+        # print(f"Calculated oeprating margin is {margin}")
         
         gap = None
         note = None
@@ -650,7 +650,7 @@ class FundamentalAnalystAgent(BaseAgent):
         equity = _row_value(balance, _EQUITY)
         value = _safe_div(net_income, equity)
 
-        print(f"Calculated ROE is {value}")
+        # print(f"Calculated ROE is {value}")
 
         note = None
         if value is not None:
@@ -681,7 +681,7 @@ class FundamentalAnalystAgent(BaseAgent):
         liabilities = _row_value(balance, _TOTAL_LIABILITIES)
         value = _safe_div(assets, liabilities)
 
-        print(f"Calculated Liquidity ratio is {value}")
+        # print(f"Calculated Liquidity ratio is {value}")
 
         note = None
         if value is not None:
@@ -712,7 +712,7 @@ class FundamentalAnalystAgent(BaseAgent):
         if value is None:
             value = _to_float(self._info(symbol).get("quickRatio"))
 
-        print(f"Calculated quick ratio is {value}")
+        # print(f"Calculated quick ratio is {value}")
 
         note = None
         if value is not None:
@@ -745,7 +745,7 @@ class FundamentalAnalystAgent(BaseAgent):
         current_liabilities = _row_value(balance, _CURRENT_LIABILITIES)
         value = _safe_div(cash_and_sti, current_liabilities)
 
-        print(f"Calculated cash ratio is {value}")
+        # print(f"Calculated cash ratio is {value}")
 
         note = None
         if value is not None:
@@ -782,7 +782,7 @@ class FundamentalAnalystAgent(BaseAgent):
         if value is None:
             value = _to_float(self._info(symbol).get("revenueGrowth"))
 
-        print(f"Calculated revenue growth is {value}")
+        # print(f"Calculated revenue growth is {value}")
 
         note = None
         if value is not None:
@@ -911,7 +911,7 @@ class FundamentalAnalystAgent(BaseAgent):
         )
         upside = _safe_div((intrinsic_value - price) if price is not None else None, price)
 
-        print(f"Calculated intrinsic value is {intrinsic_value}")
+        # print(f"Calculated intrinsic value is {intrinsic_value}")
 
         note = None
         if upside is not None:
@@ -954,28 +954,6 @@ class FundamentalAnalystAgent(BaseAgent):
             free_cash_flow_history=history,
             note=note,
         )
-
-    # def calculate_all_ratios(self, symbol: str) -> Dict[str, Any]:
-    #     """Run every ratio in one pass and return them keyed by name."""
-    #     symbol = symbol.strip().upper()
-    #     calculators = {
-    #         "pe_ratio": self.pe_ratio,
-    #         "ev_ebitda": self.ev_ebitda,
-    #         "gross_margin": self.gross_margin,
-    #         "operating_margin": self.operating_margin,
-    #         "roe": self.roe,
-    #         "liquidity_ratio": self.liquidity_ratio,
-    #         "quick_ratio": self.quick_ratio,
-    #         "cash_ratio": self.cash_ratio,
-    #         "revenue_growth_yoy": self.revenue_growth_yoy,
-    #     }
-    #     results: Dict[str, Any] = {"symbol": symbol}
-    #     for key, calculate in calculators.items():
-    #         try:
-    #             results[key] = calculate(symbol)
-    #         except Exception as exc:
-    #             results[key] = {"metric": key, "value": None, "error": str(exc)}
-    #     return results
 
     # ------------------------------------------------------------------ #
     # Tools
@@ -1066,12 +1044,6 @@ class FundamentalAnalystAgent(BaseAgent):
             Assessment found in the note field."""
             return _dump(self.discounted_cash_flow(symbol))
 
-        # @tool("calculate_all_ratios")
-        # def all_ratios_tool(symbol: str) -> str:
-        #     """Calculate every supported fundamental ratio at once: P/E, EV/EBITDA, gross margin, operating margin, ROE, liquidity ratio, quick ratio, cash ratio and revenue growth.
-        #     Assessment for each metric found in the corresponding note field."""
-        #     return _dump(self.calculate_all_ratios(symbol))
-
         return [
             get_company_info_tool,
             get_stock_price_tool,
@@ -1095,7 +1067,7 @@ class FundamentalAnalystAgent(BaseAgent):
 
     def _get_prompt(self) -> str:
         """Fundamental-analysis system prompt."""
-        print("Added fundamental system prompt")
+        # print("Added fundamental system prompt")
         return """You are a fundamental equity analyst working as part of a multi-agent research team.
         Your scope is the financial health and valuation of a single public company.
         Do not speculate about any metric which doesn't have a corresponding tool.
@@ -1112,30 +1084,12 @@ class FundamentalAnalystAgent(BaseAgent):
         ---FUNDAMENTAL ANALYSIS---
         1- Metrics Assessments
         2- Key Risks
-        2- Investment recommendation of Buy/Hold/Sell with a confidence level of High/Medium/Low
+        3- Investment recommendation of Buy/Hold/Sell with a confidence level of High/Medium/Low
         """
 
     # ------------------------------------------------------------------ #
-    # Orchestration
+    # Main call
     # ------------------------------------------------------------------ #
-
-    # def _collect_fundamentals(self, symbol: str, period: str) -> Dict[str, Any]:
-    #     """Blocking gather of everything yfinance can give us for one symbol."""
-    #     symbol = symbol.strip().upper()
-    #     bundle: Dict[str, Any] = {"symbol": symbol}
-    #     sections = {
-    #         "company_info": lambda: self.get_company_info(symbol),
-    #         "stock_price": lambda: self.get_stock_price(symbol),
-    #         "price_history": lambda: self.get_historical_data(symbol, period=period),
-    #         "financial_statements": lambda: self.get_financial_statements(symbol),
-    #         "ratios": lambda: self.calculate_all_ratios(symbol),
-    #     }
-    #     for key, fetch in sections.items():
-    #         try:
-    #             bundle[key] = fetch()
-    #         except Exception as exc:
-    #             bundle[key] = {"error": str(exc)}
-    #     return bundle
 
     async def analyze_financials(
         self,
@@ -1158,15 +1112,10 @@ class FundamentalAnalystAgent(BaseAgent):
         symbol = symbol.strip().upper()
         period = period or self.history_period
 
-        # yfinance is blocking, so keep the event loop free while it fetches.
-        # fundamentals = await asyncio.to_thread(self._collect_fundamentals, symbol, period)
-        # if context:
-        #     fundamentals["additional_context"] = context
-
         company = self.get_company_info(symbol) or {}
         display_name = company.get("longName") or company.get("shortName") or symbol
 
-        print("Added fundamental task prompt")
+        # print("Added fundamental task prompt")
         task = (
             f"""Perform a fundamental analysis of {display_name} ({symbol})"""
         )
@@ -1174,4 +1123,5 @@ class FundamentalAnalystAgent(BaseAgent):
         result = await self.execute(task=task)
         if result.success:
             result.data["symbol"] = symbol
+            result.data["analysis_type"] = "Fundamental"
         return result
