@@ -915,13 +915,13 @@ class FundamentalAnalystAgent(BaseAgent):
 
         note = None
         if upside is not None:
-            if upside > 20:
+            if upside > .2:
                 note = "Severely undervalued: strong buy"
-            elif upside > 10:
+            elif upside > .1:
                 note = "Undervalued: buy"
-            elif upside > -10:
+            elif upside > -.1:
                 note = "fairly valued: hold"
-            elif upside > 10:
+            elif upside > .1:
                 note = "overvalued: sell"
             else:
                 note = "Severely overvalued: strong sell"

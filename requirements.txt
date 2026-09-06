@@ -15,6 +15,14 @@ langgraph>=1.2.11
 # Vector DBs
 chromadb>=1.5.9
 
+# SEC EDGAR ingestion (10-Q retrieval + HTML parsing)
+requests>=2.32.0
+beautifulsoup4>=4.13.0
+lxml>=5.3.0
+# Optional: only needed to read PDF filings supplied from outside EDGAR,
+# which serves 10-Q documents as inline-XBRL HTML.
+# pypdf>=5.1.0
+
 # Financial Data
 yfinance>=1.7.0
 
