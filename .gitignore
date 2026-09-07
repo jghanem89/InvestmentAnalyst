@@ -1,0 +1,14 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Downloaded EDGAR filings and the vector store built from them.
+# Both are rebuilt by: python scripts/ingest_filings.py --tickers AAPL
+# data/filings/company_tickers.json is deliberately tracked: it is the SEC
+# ticker-to-CIK lookup, not filing content, and keeping it lets a fresh clone
+# resolve tickers without a first call to sec.gov.
+data/filings/raw/
+data/chroma/
+
+# Generated analysis reports (one per symbol per date)
+reports/

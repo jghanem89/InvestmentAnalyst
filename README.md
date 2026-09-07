@@ -50,10 +50,11 @@ findings and writes the conclusion to `reports/<SYMBOL>_<YYYY-MM-DD>.md`.
 ```
                     +-- refresh 10-Q filings (EDGAR -> ChromaDB) --+
                     |                                             |
-analyze(symbol) ----+-- fundamental analyst ----------------------+--> aggregate
-                    |                                             |    -> detect
-                    +-- (waits for filings) sentiment analyst ----+       contradictions
-                                                                        -> LLM synthesis
+                    +-- fundamental analyst ----------------------+
+analyze(symbol) ----+                                             +--> aggregate
+                    +-- earnings analyst -------------------------+     -> detect
+                    |                                             |        contradictions
+                    +-- (waits for filings) sentiment analyst ----+     -> LLM synthesis
                                                                         -> report + file
 ```
 
@@ -77,6 +78,10 @@ notice it. The checks compare structured metrics, not prose:
 | --- | --- |
 | `valuation_vs_sentiment` | DCF upside and sentiment point opposite ways |
 | `growth_vs_sentiment` | Revenue is shrinking while coverage is positive |
+| `delivery_vs_quality` | Beating consensus on low-quality earnings |
+| `earnings_vs_sentiment` | Missing consensus while the press stays positive |
+| `quality_vs_valuation` | DCF shows upside but earnings quality is Low |
+| `one_time_profit` | Net income exceeded operating income over the window |
 | `news_vs_filing` | Management tone and press tone diverge |
 | `filing_trend_vs_news` | Filing tone softened but news is positive |
 | `stated_conclusions` | The two write-ups end on opposing verdicts |
@@ -88,6 +93,72 @@ The manager's tools (`list_findings`, `get_analysis`,
 `get_contradiction_report`, `get_filing_status`) read findings that were already
 collected. Keeping the long sub-agent write-ups behind a tool lets the model
 pull only what it needs instead of carrying all of them in the prompt.
+
+---
+
+## Earnings analyst
+
+`EarningsAnalystAgent` covers the six most recent reported quarters (about
+eighteen months), using `yfinance` earnings dates for estimate-versus-actual EPS
+and the quarterly income statement for the quality indicators.
+
+### Earnings pattern
+
+Beat rate over the window, where an in-line print counts as neither a beat nor a
+miss and so dilutes the rate:
+
+| Beat rate | Pattern |
+| --- | --- |
+| >= 80% | Consistent Beat |
+| 60-80% | Regular Beat |
+| 40-60% | Inconsistent |
+| 20-40% | Regular Miss |
+| < 20% | Consistent Miss |
+
+### Earnings quality
+
+Four indicators, each scored good / bad / neutral:
+
+| Indicator | Good | Bad |
+| --- | --- | --- |
+| Revenue volatility | CV < 0.10 | CV > 0.30 |
+| Gross margin volatility | std < 0.02 | std > 0.05 |
+| Net vs operating income | *not reachable* | net exceeds operating by >30%, or falls short by >45% |
+| Earnings vs revenue growth | both growing, earnings faster | earnings growing, revenue not |
+
+Categories, checked in order:
+
+| Category | Condition |
+| --- | --- |
+| Very Good | 3 good, 0 bad |
+| Good | (3 good, 1 bad) or (2 good, 0 bad) |
+| Low | 2 bad, 0 good |
+| Very Low | 3 or more bad |
+| Average | anything else |
+
+Net income against operating income scores bad or neutral only: a wide gap in
+either direction means profit is not tracking operations, so no reading of it
+counts in the company's favour. Three good is therefore a clean sweep of every
+indicator that can be won, which is why Very Good sits there rather than at
+four.
+
+Two notes on the implementation:
+
+**Revenue volatility is a coefficient of variation** (std / mean), not a raw
+standard deviation. The 0.1 / 0.3 thresholds are dimensionless, so they only
+make sense against a normalised measure; a raw standard deviation would be in
+currency units and would scale with company size. Gross margin is already a
+ratio, so that one is a plain standard deviation.
+
+**Negative operating income bypasses the ratio.** Comparing net income against a
+negative operating income produces meaningless output (INTC reported "short by
+570%" before this was handled), so operating losses are scored bad directly,
+with the one-time signal raised when the company is net-profitable anyway.
+
+`yfinance` publishes only about five quarters of income statement against
+twenty-plus quarters of earnings dates, so the pattern uses the full six-quarter
+window while the quality indicators use whatever quarters exist, and report the
+count.
 
 ---
 

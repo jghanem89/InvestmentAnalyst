@@ -19,18 +19,20 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import BaseTool, tool
 
 try:  # running with `src` on the path
     from src.agents.baseAgent import AgentResult, BaseAgent
+    from src.agents.earningsAnalyst import EarningsAnalystAgent
     from src.agents.fundamentalAnalyst import FundamentalAnalystAgent
     from src.agents.sentimentAnalyst import SentimentAnalystAgent
     from src.rag.config import RAGConfig
     from src.rag.ingest import FilingIngestionPipeline
 except ImportError:  # running from inside `src/agents`
     from baseAgent import AgentResult, BaseAgent
+    from earningsAnalyst import EarningsAnalystAgent
     from fundamentalAnalyst import FundamentalAnalystAgent
     from sentimentAnalyst import SentimentAnalystAgent
     from rag.config import RAGConfig
@@ -66,9 +68,9 @@ class ResearchManagerAgent(BaseAgent):
 
     DEFAULT_NAME = "research_manager"
     DEFAULT_DESCRIPTION = (
-        "Orchestrates company research: delegates fundamental and sentiment "
-        "analysis to specialist sub-agents, reconciles their findings and "
-        "produces the final recommendation."
+        "Orchestrates company research: delegates fundamental, earnings and "
+        "sentiment analysis to specialist sub-agents, reconciles their findings "
+        "and produces the final recommendation."
     )
 
     # Sub-agents are slow local models; generous enough not to cut off a working
@@ -90,6 +92,7 @@ class ResearchManagerAgent(BaseAgent):
         verbose: bool = False,
         fundamental_agent: Optional[FundamentalAnalystAgent] = None,
         sentiment_agent: Optional[SentimentAnalystAgent] = None,
+        earnings_agent: Optional[EarningsAnalystAgent] = None,
         reports_dir: Optional[Path] = None,
         ingest_filings: bool = True,
         rag_config: Optional[RAGConfig] = None,
@@ -102,6 +105,7 @@ class ResearchManagerAgent(BaseAgent):
 
         self.fundamental_agent = fundamental_agent or FundamentalAnalystAgent(verbose=verbose)
         self.sentiment_agent = sentiment_agent or SentimentAnalystAgent(verbose=verbose)
+        self.earnings_agent = earnings_agent or EarningsAnalystAgent(verbose=verbose)
 
         # Populated by analyze(); the LLM tools read from here.
         self._findings: Dict[str, Dict[str, Any]] = {}
@@ -128,6 +132,13 @@ class ResearchManagerAgent(BaseAgent):
                 "title": "Fundamental analysis",
                 "agent": self.fundamental_agent,
                 "coroutine": lambda: self.fundamental_agent.analyze_financials(symbol),
+                "needs_filings": False,
+            },
+            {
+                "type": "earnings",
+                "title": "Quarterly earnings analysis",
+                "agent": self.earnings_agent,
+                "coroutine": lambda: self.earnings_agent.analyze_earnings(symbol),
                 "needs_filings": False,
             },
             {
@@ -281,6 +292,26 @@ class ResearchManagerAgent(BaseAgent):
             signals["revenue_growth_error"] = str(exc)
 
         try:
+            pattern = self.earnings_agent.earnings_pattern(symbol)
+            signals["earnings_pattern"] = pattern.get("pattern")
+            signals["beat_rate_pct"] = pattern.get("beat_rate_pct")
+            signals["earnings_misses"] = pattern.get("misses")
+            signals["average_surprise_pct"] = pattern.get("average_surprise_pct")
+        except Exception as exc:
+            signals["earnings_pattern_error"] = str(exc)
+
+        try:
+            quality = self.earnings_agent.earnings_quality(symbol)
+            signals["earnings_quality"] = quality.get("quality")
+            signals["quality_good_indicators"] = quality.get("good_indicators")
+            signals["quality_bad_indicators"] = quality.get("bad_indicators")
+            signals["one_time_profit_signal"] = any(
+                i.get("one_time_signal") for i in quality.get("indicators", [])
+            )
+        except Exception as exc:
+            signals["earnings_quality_error"] = str(exc)
+
+        try:
             combined = self.sentiment_agent._combined_sentiment(symbol)
             signals["sentiment_polarity"] = combined.get("composite_polarity")
             signals["sentiment_label"] = combined.get("composite_label")
@@ -345,8 +376,58 @@ class ResearchManagerAgent(BaseAgent):
                     ),
                 })
 
+        pattern = signals.get("earnings_pattern")
+        quality = signals.get("earnings_quality")
+
+        # Beating consensus every quarter while the profit behind it is weak is
+        # the disagreement most likely to be missed by reading either write-up
+        # on its own.
+        if pattern in ("Consistent Beat", "Regular Beat") and quality in ("Low", "Very Low"):
+            found.append({
+                "kind": "delivery_vs_quality",
+                "detail": (
+                    f"Earnings pattern is '{pattern}' ({signals.get('beat_rate_pct')}% beat rate) "
+                    f"but earnings quality is '{quality}'. The company is clearing consensus on "
+                    "profit that the quality indicators do not support."
+                ),
+            })
+
+        if pattern in ("Regular Miss", "Consistent Miss") and polarity is not None \
+                and polarity > self.SENTIMENT_THRESHOLD:
+            found.append({
+                "kind": "earnings_vs_sentiment",
+                "detail": (
+                    f"Earnings pattern is '{pattern}' ({signals.get('earnings_misses')} misses) "
+                    f"while coverage is positive ({polarity:+.3f}). The press is not pricing in "
+                    "the delivery record."
+                ),
+            })
+
+        if quality in ("Low", "Very Low") and upside is not None \
+                and upside > self.DCF_UPSIDE_THRESHOLD:
+            found.append({
+                "kind": "quality_vs_valuation",
+                "detail": (
+                    f"The DCF shows {upside:.1f}% upside, but earnings quality is '{quality}'. "
+                    "A cash-flow valuation built on low-quality earnings overstates the case."
+                ),
+            })
+
+        if signals.get("one_time_profit_signal"):
+            found.append({
+                "kind": "one_time_profit",
+                "detail": (
+                    "Net income exceeded operating income over the window, so reported profit "
+                    "included material non-operating items. Check whether the fundamental "
+                    "metrics rest on earnings that will not repeat."
+                ),
+            })
+
+        # Whitelisted rather than excluded: the flag also carries "filing_unavailable"
+        # and "news_unavailable", which mean one side is missing, not that the two
+        # sides disagree.
         flag = signals.get("sentiment_divergence_flag")
-        if flag and flag not in ("aligned", "no_data"):
+        if flag in ("filing_more_positive_than_press", "press_more_positive_than_filing"):
             found.append({
                 "kind": "news_vs_filing",
                 "detail": (
@@ -476,7 +557,11 @@ class ResearchManagerAgent(BaseAgent):
         views into a bland middle. For each one, state which side you find more credible and
         why, in terms of the evidence behind it. Useful considerations:
         - A DCF rests on assumptions about growth and discount rate; it is a weak signal when
-          the gap to market price is extreme.
+          the gap to market price is extreme, and weaker still when earnings quality is low,
+          because the cash flows it extrapolates may not repeat.
+        - An earnings beat measures delivery against consensus, not business strength. A
+          Consistent Beat alongside low earnings quality means the company is clearing a bar
+          that was set low, or clearing it with profit that is not operational.
         - TextBlob sentiment measures tone, not accuracy. A 10-Q is written by management and
           reviewed by lawyers, so its absolute polarity means little; the change against the
           prior quarter and the gap against press coverage are what carry information.
@@ -494,10 +579,11 @@ class ResearchManagerAgent(BaseAgent):
         ---INVESTMENT RESEARCH SUMMARY---
         1- Company Overview: what was analyzed and which analyses completed
         2- Fundamental Findings: the key metrics and what they show
-        3- Sentiment Findings: news tone, filing tone, and the change versus last quarter
-        4- Contradictions and Resolution: every disagreement found, and which side you favour
-        5- Overall Recommendation: Buy/Hold/Sell with a confidence of High/Medium/Low
-        6- Key Risks: what would change this conclusion
+        3- Earnings Findings: beat/miss pattern, earnings quality category, and any red flags
+        4- Sentiment Findings: news tone, filing tone, and the change versus last quarter
+        5- Contradictions and Resolution: every disagreement found, and which side you favour
+        6- Overall Recommendation: Buy/Hold/Sell with a confidence of High/Medium/Low
+        7- Key Risks: what would change this conclusion
         """
 
     # ------------------------------------------------------------------ #
