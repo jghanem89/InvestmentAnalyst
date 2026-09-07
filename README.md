@@ -98,9 +98,9 @@ sentiment agent can score what management actually wrote, alongside the news.
 
 ### Ingesting filings
 
-Ingestion is a batch step. Run it before asking the agent for an analysis; the
-agent only reads from the store and never ingests at query time.
-
+Ingestion is run by the researchManager at the start of every run. 
+However, the process is slightly faster if all required data is ingested in batch before the analysis.
+Use the below query to load the vector db with as many 10-Q filings
 ```
 python scripts/ingest_filings.py --tickers AAPL MSFT --limit 2
 ```
@@ -127,8 +127,8 @@ Filings are cached as HTML under `data/filings/raw/` and vectors under
 
 ### Notes on the implementation
 
-**EDGAR serves 10-Qs as HTML, not PDF.** There is no PDF rendition of a 10-Q on
-EDGAR; the primary document is inline XBRL. `extract.py` parses that HTML. A
+**EDGAR serves 10-Qs as HTML**
+The primary document is inline XBRL. `extract.py` parses that HTML. A
 `pypdf` path is wired in for filings supplied from elsewhere, but the EDGAR
 route never uses it.
 
