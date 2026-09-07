@@ -15,19 +15,19 @@ It is a multi-agent architecture allowing for specialized agents to perform thei
 - A sub-agent responsible for the fundamental analysis sub-task
 - A sub-agent responsible for the earnings analysis sub-task
 - A sub-agent responsible for the sentiment analysis sub-task
-- Potentially a sub-agent for RAG retrieval?
 
 ---
 
 ## Installation
 - Download repo
 - Install python>=3.14.6
-- Make sure to intall all requirement with the below command in terminal
+- Make sure to intall all requirement with the below command in terminal \
 pip install -r .\requirements.txt
-- Download Ollama
-run the below command in Windows PowerShell as administrator
+- Download Ollama \
+run the below command in Windows PowerShell as administrator \
 irm https://ollama.com/install.ps1 | iex
-- Pull the chat model and the embedding model
+- Pull the chat model and the embedding model \
+LLM currently harcoded to qwen3:8b - future iterations will generalize the LLM selection
 ```
 ollama pull qwen3:8b
 ollama pull nomic-embed-text
