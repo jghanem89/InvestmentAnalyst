@@ -264,7 +264,7 @@ class FundamentalAnalystAgent(BaseAgent):
     )
 
     # Simplified DCF assumptions.
-    DCF_DISCOUNT_RATE = 0.10
+    DCF_DISCOUNT_RATE = 0.05
     DCF_TERMINAL_GROWTH = 0.02
     DCF_FORECAST_YEARS = 10
 
