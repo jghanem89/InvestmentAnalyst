@@ -103,6 +103,8 @@ class ResearchManagerAgent(BaseAgent):
         self.should_ingest = ingest_filings
         self.rag_config = rag_config or RAGConfig()
 
+        print("Initializing research_manager")
+
         self.fundamental_agent = fundamental_agent or FundamentalAnalystAgent(verbose=verbose)
         self.sentiment_agent = sentiment_agent or SentimentAnalystAgent(verbose=verbose)
         self.earnings_agent = earnings_agent or EarningsAnalystAgent(verbose=verbose)
